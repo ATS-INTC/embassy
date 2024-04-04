@@ -1,6 +1,6 @@
 //! UDP sockets.
 
-use core::cell::RefCell;
+use core::cell::SyncUnsafeCell;
 use core::future::poll_fn;
 use core::mem;
 use core::task::{Context, Poll};
@@ -43,7 +43,7 @@ pub enum RecvError {
 
 /// An UDP socket.
 pub struct UdpSocket<'a> {
-    stack: &'a RefCell<SocketStack>,
+    stack: &'a SyncUnsafeCell<SocketStack>,
     handle: SocketHandle,
 }
 
@@ -56,7 +56,7 @@ impl<'a> UdpSocket<'a> {
         tx_meta: &'a mut [PacketMetadata],
         tx_buffer: &'a mut [u8],
     ) -> Self {
-        let s = &mut *stack.socket.borrow_mut();
+        let s = unsafe { &mut *stack.socket.get() };
 
         let rx_meta: &'static mut [PacketMetadata] = unsafe { mem::transmute(rx_meta) };
         let rx_buffer: &'static mut [u8] = unsafe { mem::transmute(rx_buffer) };
@@ -82,7 +82,7 @@ impl<'a> UdpSocket<'a> {
 
         if endpoint.port == 0 {
             // If user didn't specify port allocate a dynamic port.
-            endpoint.port = self.stack.borrow_mut().get_local_port();
+            endpoint.port = (unsafe { &mut *self.stack.get() }).get_local_port();
         }
 
         match self.with_mut(|s, _| s.bind(endpoint)) {
@@ -93,13 +93,13 @@ impl<'a> UdpSocket<'a> {
     }
 
     fn with<R>(&self, f: impl FnOnce(&udp::Socket, &Interface) -> R) -> R {
-        let s = &*self.stack.borrow();
+        let s = unsafe { &*self.stack.get() };
         let socket = s.sockets.get::<udp::Socket>(self.handle);
         f(socket, &s.iface)
     }
 
     fn with_mut<R>(&self, f: impl FnOnce(&mut udp::Socket, &mut Interface) -> R) -> R {
-        let s = &mut *self.stack.borrow_mut();
+        let s = unsafe { &mut *self.stack.get() };
         let socket = s.sockets.get_mut::<udp::Socket>(self.handle);
         let res = f(socket, &mut s.iface);
         s.waker.wake();
@@ -231,6 +231,6 @@ impl<'a> UdpSocket<'a> {
 
 impl Drop for UdpSocket<'_> {
     fn drop(&mut self) {
-        self.stack.borrow_mut().sockets.remove(self.handle);
+        (unsafe { &mut *self.stack.get() }).sockets.remove(self.handle);
     }
 }

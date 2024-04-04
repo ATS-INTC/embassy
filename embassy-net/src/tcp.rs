@@ -8,7 +8,7 @@
 //! Incoming connections when no socket is listening are rejected. To accept many incoming
 //! connections, create many sockets and put them all into listening mode.
 
-use core::cell::RefCell;
+use core::cell::SyncUnsafeCell;
 use core::future::poll_fn;
 use core::mem;
 use core::task::Poll;
@@ -137,7 +137,7 @@ impl<'a> TcpWriter<'a> {
 impl<'a> TcpSocket<'a> {
     /// Create a new TCP socket on the given stack, with the given buffers.
     pub fn new<D: Driver>(stack: &'a Stack<D>, rx_buffer: &'a mut [u8], tx_buffer: &'a mut [u8]) -> Self {
-        let s = &mut *stack.socket.borrow_mut();
+        let s = unsafe { &mut *stack.socket.get() };
         let rx_buffer: &'static mut [u8] = unsafe { mem::transmute(rx_buffer) };
         let tx_buffer: &'static mut [u8] = unsafe { mem::transmute(tx_buffer) };
         let handle = s.sockets.add(tcp::Socket::new(
@@ -195,7 +195,7 @@ impl<'a> TcpSocket<'a> {
     where
         T: Into<IpEndpoint>,
     {
-        let local_port = self.io.stack.borrow_mut().get_local_port();
+        let local_port = (unsafe { &mut *self.io.stack.get() }).get_local_port();
 
         match {
             self.io
@@ -358,7 +358,7 @@ impl<'a> TcpSocket<'a> {
 
 impl<'a> Drop for TcpSocket<'a> {
     fn drop(&mut self) {
-        self.io.stack.borrow_mut().sockets.remove(self.io.handle);
+        (unsafe { &mut *self.io.stack.get() }).sockets.remove(self.io.handle);
     }
 }
 
@@ -366,19 +366,19 @@ impl<'a> Drop for TcpSocket<'a> {
 
 #[derive(Copy, Clone)]
 struct TcpIo<'a> {
-    stack: &'a RefCell<SocketStack>,
+    stack: &'a SyncUnsafeCell<SocketStack>,
     handle: SocketHandle,
 }
 
 impl<'d> TcpIo<'d> {
     fn with<R>(&self, f: impl FnOnce(&tcp::Socket, &Interface) -> R) -> R {
-        let s = &*self.stack.borrow();
+        let s = unsafe { &*self.stack.get() };
         let socket = s.sockets.get::<tcp::Socket>(self.handle);
         f(socket, &s.iface)
     }
 
     fn with_mut<R>(&mut self, f: impl FnOnce(&mut tcp::Socket, &mut Interface) -> R) -> R {
-        let s = &mut *self.stack.borrow_mut();
+        let s = unsafe { &mut *self.stack.get() };
         let socket = s.sockets.get_mut::<tcp::Socket>(self.handle);
         let res = f(socket, &mut s.iface);
         s.waker.wake();

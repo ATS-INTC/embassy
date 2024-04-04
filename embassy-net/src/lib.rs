@@ -1,5 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(async_fn_in_trait)]
+#![feature(sync_unsafe_cell)]
 #![warn(missing_docs)]
 #![doc = include_str!("../README.md")]
 
@@ -21,7 +22,7 @@ mod time;
 #[cfg(feature = "udp")]
 pub mod udp;
 
-use core::cell::RefCell;
+use core::cell::SyncUnsafeCell;
 use core::future::{poll_fn, Future};
 use core::task::{Context, Poll};
 
@@ -239,9 +240,12 @@ pub enum ConfigV6 {
 ///
 /// This is the main entry point for the network stack.
 pub struct Stack<D: Driver> {
-    pub(crate) socket: RefCell<SocketStack>,
-    inner: RefCell<Inner<D>>,
+    pub(crate) socket: SyncUnsafeCell<SocketStack>,
+    inner: SyncUnsafeCell<Inner<D>>,
 }
+
+unsafe impl<D: Driver> Send for Stack<D> {}
+unsafe impl<D: Driver> Sync for Stack<D> {}
 
 struct Inner<D: Driver> {
     device: D,
@@ -267,6 +271,9 @@ pub(crate) struct SocketStack {
     pub(crate) waker: WakerRegistration,
     next_local_port: u16,
 }
+
+unsafe impl Sync for SocketStack {}
+unsafe impl Send for SocketStack {}
 
 fn to_smoltcp_hardware_address(addr: driver::HardwareAddress) -> (HardwareAddress, Medium) {
     match addr {
@@ -350,17 +357,17 @@ impl<D: Driver> Stack<D> {
         inner.apply_static_config(&mut socket);
 
         Self {
-            socket: RefCell::new(socket),
-            inner: RefCell::new(inner),
+            socket: SyncUnsafeCell::new(socket),
+            inner: SyncUnsafeCell::new(inner),
         }
     }
 
     fn with<R>(&self, f: impl FnOnce(&SocketStack, &Inner<D>) -> R) -> R {
-        f(&*self.socket.borrow(), &*self.inner.borrow())
+        f(unsafe { &*self.socket.get() }, unsafe { &*self.inner.get() })
     }
 
     fn with_mut<R>(&self, f: impl FnOnce(&mut SocketStack, &mut Inner<D>) -> R) -> R {
-        f(&mut *self.socket.borrow_mut(), &mut *self.inner.borrow_mut())
+        f(unsafe { &mut *self.socket.get() }, unsafe { &mut *self.inner.get() })
     }
 
     /// Get the hardware address of the network interface.
