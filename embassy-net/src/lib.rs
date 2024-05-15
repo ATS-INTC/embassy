@@ -503,6 +503,11 @@ impl<D: Driver> Stack<D> {
         unreachable!()
     }
 
+    /// 
+    pub fn run_one(&self, cx: &mut Context<'_>) {
+        self.with_mut(|s, i| i.poll_nocx(cx, s));
+    }
+
     /// Make a query for a given name and return the corresponding IP addresses.
     #[cfg(feature = "dns")]
     pub async fn dns_query(
@@ -915,6 +920,71 @@ impl<D: Driver> Inner<D> {
             if t.poll(cx).is_ready() {
                 cx.waker().wake_by_ref();
             }
+        }
+    }
+
+    fn poll_nocx(&mut self, cx: &mut Context<'_>, s: &mut SocketStack) {
+
+        let (_hardware_addr, medium) = to_smoltcp_hardware_address(self.device.hardware_address());
+
+        #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+        {
+            let do_set = match medium {
+                #[cfg(feature = "medium-ethernet")]
+                Medium::Ethernet => true,
+                #[cfg(feature = "medium-ieee802154")]
+                Medium::Ieee802154 => true,
+                #[allow(unreachable_patterns)]
+                _ => false,
+            };
+            if do_set {
+                s.iface.set_hardware_addr(_hardware_addr);
+            }
+        }
+
+        let timestamp = instant_to_smoltcp(Instant::now());
+        let mut smoldev = DriverAdapter {
+            cx: Some(cx),
+            inner: &mut self.device,
+            medium,
+        };
+        s.iface.poll(timestamp, &mut smoldev, &mut s.sockets);
+
+        #[allow(unused_mut)]
+        let mut apply_config = false;
+
+        #[cfg(feature = "dhcpv4")]
+        if let Some(dhcp_handle) = self.dhcp_socket {
+            let socket = s.sockets.get_mut::<dhcpv4::Socket>(dhcp_handle);
+
+            if self.link_up {
+                if old_link_up != self.link_up {
+                    socket.reset();
+                }
+                match socket.poll() {
+                    None => {}
+                    Some(dhcpv4::Event::Deconfigured) => {
+                        self.static_v4 = None;
+                        apply_config = true;
+                    }
+                    Some(dhcpv4::Event::Configured(config)) => {
+                        self.static_v4 = Some(StaticConfigV4 {
+                            address: config.address,
+                            gateway: config.router,
+                            dns_servers: config.dns_servers,
+                        });
+                        apply_config = true;
+                    }
+                }
+            } else if old_link_up {
+                socket.reset();
+                self.static_v4 = None;
+                apply_config = true;
+            }
+        }
+
+        if apply_config {
+            self.apply_static_config(s);
         }
     }
 }
